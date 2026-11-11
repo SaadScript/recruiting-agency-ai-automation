@@ -2,7 +2,6 @@
 
 An n8n automation system that turns a staffing agency's existing candidate database into new placements. When a new job opens, it finds the best-fitting past candidates, drafts a personal email to each one for the recruiter to approve, follows up automatically, detects replies and bounces, and sends the agency owner a monthly results report.
 
-**Demo video:** _[add your video link here]_
 
 ---
 
@@ -115,4 +114,4 @@ All candidate data in this repository is fictional.
 ## Author
 
 **Saad Khan**: AI automation for recruiting and staffing agencies
-_[LinkedIn link] · [email]_
+
