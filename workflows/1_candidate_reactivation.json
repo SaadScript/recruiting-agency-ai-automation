@@ -1,0 +1,715 @@
+{
+  "name": "Recruiting - 1. Candidate Reactivation",
+  "nodes": [
+    {
+      "parameters": {
+        "formTitle": "New Job Opening: Candidate Reactivation",
+        "formDescription": "Enter the new job. The workflow finds past candidates in your database who fit, writes personalized emails as Gmail drafts for you to review, and starts a follow-up sequence once you send them.",
+        "formFields": {
+          "values": [
+            {
+              "fieldLabel": "Agency name",
+              "placeholder": "Northfield Staffing",
+              "requiredField": true
+            },
+            {
+              "fieldLabel": "Job title",
+              "placeholder": "ICU Registered Nurse",
+              "requiredField": true
+            },
+            {
+              "fieldLabel": "Required skills",
+              "placeholder": "ICU, critical care, BLS, ACLS, Epic",
+              "requiredField": true,
+              "fieldType": "textarea"
+            },
+            {
+              "fieldLabel": "Location",
+              "placeholder": "Austin, TX",
+              "requiredField": true
+            },
+            {
+              "fieldLabel": "Pay rate",
+              "placeholder": "$50-56/hr",
+              "requiredField": false
+            },
+            {
+              "fieldLabel": "Shift / schedule",
+              "placeholder": "3x12 nights",
+              "requiredField": false
+            },
+            {
+              "fieldLabel": "Client description",
+              "placeholder": "a 400-bed hospital in Austin",
+              "requiredField": false
+            },
+            {
+              "fieldLabel": "Recruiter name",
+              "placeholder": "Sarah Collins",
+              "requiredField": true
+            },
+            {
+              "fieldLabel": "Recruiter email",
+              "placeholder": "you@yourdomain.com",
+              "requiredField": true,
+              "fieldType": "email"
+            },
+            {
+              "fieldLabel": "Max candidates to contact",
+              "placeholder": "5",
+              "requiredField": true,
+              "fieldType": "number"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "8776eeea-272b-4af5-b810-09fc9e0673a5",
+      "name": "Job Opening Form",
+      "type": "n8n-nodes-base.formTrigger",
+      "typeVersion": 2.2,
+      "position": [
+        0,
+        300
+      ],
+      "webhookId": "0250fb33-3c4c-4969-b8e4-c325da3c32b4"
+    },
+    {
+      "parameters": {
+        "jsCode": "// ===== SETTINGS: the only node you normally need to edit =====\nreturn [{\n  json: {\n    SHEET_URL: 'PASTE_YOUR_GOOGLE_SHEET_URL_HERE',\n    TIMEZONE: 'America/Chicago',  // the agency's time zone\n    COOLDOWN_DAYS: 30,            // never re-contact anyone reached in the last 30 days\n    MAX_TO_SCORE: 12,             // how many candidates the AI reviews per job\n    MIN_SCORE: 70,                // 70+ = strong match\n    // Candidates with these statuses are never contacted\n    EXCLUDED_STATUSES: ['do not contact', 'placed', 'not looking', 'interviewing', 'responded', 'email bounced'],\n  },\n}];\n"
+      },
+      "id": "2b8d3281-bd46-4723-86df-bff4c01e7202",
+      "name": "Settings",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        240,
+        300
+      ],
+      "notes": "Paste your Google Sheet URL here",
+      "notesInFlow": true
+    },
+    {
+      "parameters": {
+        "operation": "read",
+        "documentId": {
+          "__rl": true,
+          "value": "={{ $('Settings').first().json.SHEET_URL }}",
+          "mode": "url"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "Candidates",
+          "mode": "name"
+        },
+        "options": {}
+      },
+      "id": "a8cb2f01-8bd7-4e66-b80c-b3243aaeb2e7",
+      "name": "Read Candidates (ATS)",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        480,
+        300
+      ],
+      "notes": "Stand-in for the agency's ATS",
+      "notesInFlow": true
+    },
+    {
+      "parameters": {
+        "jsCode": "// Pre-filter: skip people who must not be contacted, skip recent contacts,\n// and keep only candidates whose title/skills overlap the job.\nconst S = $('Settings').first().json;\nconst form = $('Job Opening Form').first().json;\nconst job = {\n  agency: form['Agency name'] || 'our agency',\n  title: form['Job title'],\n  skills: form['Required skills'],\n  location: form['Location'],\n  pay: form['Pay rate'] || 'Not specified',\n  shift: form['Shift / schedule'] || 'Not specified',\n  client: form['Client description'] || 'one of our clients',\n  recruiter_name: form['Recruiter name'],\n  recruiter_email: form['Recruiter email'],\n  max_contacts: Number(form['Max candidates to contact']) || 5,\n};\n\nconst excluded = S.EXCLUDED_STATUSES.map((s) => s.toLowerCase());\nconst STOP = new Set(['and', 'or', 'the', 'with', 'for', 'of', 'in', 'to', 'a', 'an', 'on', 'at']);\nconst words = (s) => String(s || '').toLowerCase().split(/[^a-z0-9+#]+/).filter((w) => w.length > 1 && !STOP.has(w));\nconst jobTerms = new Set(words(`${job.title} ${job.skills}`));\nconst now = new Date();\n\nconst shortlist = [];\nfor (const item of $input.all()) {\n  const c = item.json;\n  if (!c.candidate_id) continue;\n  if (excluded.includes(String(c.status || '').trim().toLowerCase())) continue;\n  if (c.last_contacted) {\n    const last = new Date(c.last_contacted);\n    if (!isNaN(last) && (now - last) / 86400000 < S.COOLDOWN_DAYS) continue;\n  }\n  const candTerms = new Set(words(`${c.current_title} ${c.skills}`));\n  let overlap = 0;\n  for (const t of jobTerms) if (candTerms.has(t)) overlap++;\n  if (overlap === 0) continue;\n  shortlist.push({ json: { ...c, pre_score: overlap, job } });\n}\n\nshortlist.sort((a, b) => b.json.pre_score - a.json.pre_score);\nreturn shortlist.slice(0, S.MAX_TO_SCORE);\n"
+      },
+      "id": "43c47b9f-84c8-4f32-8c0b-a1df0184e5e8",
+      "name": "Pre-filter Candidates",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        720,
+        300
+      ],
+      "notes": "Skips excluded statuses + recent contacts",
+      "notesInFlow": true
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "=You are helping a recruiter at a staffing agency decide which past candidates to re-engage for a new job opening.\n\nJOB\nTitle: {{ $json.job.title }}\nRequired skills: {{ $json.job.skills }}\nLocation: {{ $json.job.location }}\nPay: {{ $json.job.pay }}\nShift / schedule: {{ $json.job.shift }}\n\nCANDIDATE\nCurrent title: {{ $json.current_title }}\nSkills and certifications: {{ $json.skills }}\nYears of experience: {{ $json.years_experience }}\nLocation: {{ $json.location }}\nDesired pay: {{ $json.desired_pay }}\nRecruiter notes: {{ $json.notes || 'None' }}\n\nScore how well this candidate fits the job from 0 to 100. Use only job-relevant factors: skills and certifications, relevant experience, location or commute, pay expectations, and preferences stated in the recruiter notes. Do not consider or guess at age, gender, race, ethnicity, religion, disability, or any other protected characteristic.\n\nScoring guide: 85-100 strong fit, 70-84 good fit worth contacting, 50-69 partial fit, below 50 not a fit.\n\nReply with JSON only, no other text:\n{\"score\": <number 0-100>, \"reason\": \"<one or two sentences the recruiter can verify>\"}"
+      },
+      "id": "892e7a72-92c4-484d-93b2-3e75676a5f59",
+      "name": "AI: Score Fit",
+      "type": "@n8n/n8n-nodes-langchain.chainLlm",
+      "typeVersion": 1.5,
+      "position": [
+        960,
+        300
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000
+    },
+    {
+      "parameters": {
+        "model": {
+          "__rl": true,
+          "value": "gpt-4o-mini",
+          "mode": "list",
+          "cachedResultName": "gpt-4o-mini"
+        },
+        "options": {
+          "temperature": 0.1
+        }
+      },
+      "id": "a415eaa5-743a-4616-bdd4-c77682d81832",
+      "name": "OpenAI (Scoring)",
+      "type": "@n8n/n8n-nodes-langchain.lmChatOpenAi",
+      "typeVersion": 1.2,
+      "position": [
+        980,
+        520
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Read the AI's JSON reply for each candidate and attach score + reason.\nconst MIN_SCORE = $('Settings').first().json.MIN_SCORE;\nconst candidates = $('Pre-filter Candidates').all();\n\nreturn $input.all().map((item, i) => {\n  const c = candidates[i].json;\n  let score = 0;\n  let reason = 'AI response could not be read; review manually.';\n  const match = String(item.json.text || '').match(/\\{[\\s\\S]*\\}/);\n  if (match) {\n    try {\n      const parsed = JSON.parse(match[0]);\n      score = Math.max(0, Math.min(100, Math.round(Number(parsed.score) || 0)));\n      reason = String(parsed.reason || reason).trim();\n    } catch (e) { /* keep defaults */ }\n  }\n  return { json: { ...c, score, reason, matched: score >= MIN_SCORE } };\n});\n"
+      },
+      "id": "5bff2407-a2c4-42a5-97a7-439a3cf34cf3",
+      "name": "Parse Scores",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1200,
+        300
+      ],
+      "notes": "MIN_SCORE from Settings",
+      "notesInFlow": true
+    },
+    {
+      "parameters": {
+        "jsCode": "// One log row per scored candidate, matching the Match_Log column headers.\nconst S = $('Settings').first().json;\nconst runDate = new Intl.DateTimeFormat('sv-SE', { timeZone: S.TIMEZONE, year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }).format(new Date());\nreturn $input.all().map((i) => ({\n  json: {\n    run_date: runDate,\n    job_title: i.json.job.title,\n    candidate_id: i.json.candidate_id,\n    candidate_name: `${i.json.first_name} ${i.json.last_name}`,\n    score: i.json.score,\n    matched: i.json.matched ? 'Yes' : 'No',\n    reason: i.json.reason,\n  },\n}));\n"
+      },
+      "id": "4151a1f9-9550-4196-8e99-1f1924eda87d",
+      "name": "Prepare Log Rows",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1440,
+        60
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "value": "={{ $('Settings').first().json.SHEET_URL }}",
+          "mode": "url"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "Match_Log",
+          "mode": "name"
+        },
+        "columns": {
+          "mappingMode": "autoMapInputData",
+          "value": {},
+          "matchingColumns": [],
+          "schema": []
+        },
+        "options": {}
+      },
+      "id": "8f8463ad-ac58-45f0-a6d1-38088138fda3",
+      "name": "Log to Match_Log",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        1680,
+        60
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Keep only strong matches, best first, up to the limit set in the form.\nconst matches = $input.all()\n  .filter((i) => i.json.matched)\n  .sort((a, b) => b.json.score - a.json.score);\nif (matches.length === 0) return [];\nreturn matches.slice(0, matches[0].json.job.max_contacts);\n"
+      },
+      "id": "344e145b-f47d-42a5-94a4-58a1e33423de",
+      "name": "Select Top Matches",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1440,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "=Write a short re-engagement email from a recruiter to a past candidate about a new job opening.\n\nRecruiter: {{ $json.job.recruiter_name }} at {{ $json.job.agency }}\nCandidate first name: {{ $json.first_name }}\nCandidate background: {{ $json.current_title }}; skills: {{ $json.skills }}; notes: {{ $json.notes || 'none' }}\n\nJob: {{ $json.job.title }} with {{ $json.job.client }}\nLocation: {{ $json.job.location }}\nPay: {{ $json.job.pay }}\nShift / schedule: {{ $json.job.shift }}\nWhy it may fit them: {{ $json.reason }}\n\nRules:\n- 90 to 140 words, warm and professional, plain text.\n- Mention one or two specific reasons the role fits their background.\n- Only use facts given above. Do not invent benefits, bonuses, start dates or other details.\n- Do not mention AI, scores, or that they were matched by software.\n- End by asking whether they would like details or a quick call this week.\n- Sign off with the recruiter's first name and the agency name.\n\nReply with JSON only, no other text:\n{\"subject\": \"<subject line under 8 words>\", \"body\": \"<email body, use \\n for line breaks>\"}"
+      },
+      "id": "898e8681-1878-44b6-99b5-5da89a7ce08b",
+      "name": "AI: Write Email",
+      "type": "@n8n/n8n-nodes-langchain.chainLlm",
+      "typeVersion": 1.5,
+      "position": [
+        1680,
+        300
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000
+    },
+    {
+      "parameters": {
+        "model": {
+          "__rl": true,
+          "value": "gpt-4o-mini",
+          "mode": "list",
+          "cachedResultName": "gpt-4o-mini"
+        },
+        "options": {
+          "temperature": 0.6
+        }
+      },
+      "id": "5e2fa38a-59bc-441c-b077-69121d9a3b63",
+      "name": "OpenAI (Writing)",
+      "type": "@n8n/n8n-nodes-langchain.lmChatOpenAi",
+      "typeVersion": 1.2,
+      "position": [
+        1700,
+        520
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Read the AI's subject + body; fall back to a simple safe template if needed.\nconst candidates = $('Select Top Matches').all();\n\nreturn $input.all().map((item, i) => {\n  const c = candidates[i].json;\n  let subject = `New ${c.job.title} opening in ${c.job.location}`;\n  let body = '';\n  const match = String(item.json.text || '').match(/\\{[\\s\\S]*\\}/);\n  if (match) {\n    try {\n      const parsed = JSON.parse(match[0]);\n      subject = String(parsed.subject || subject).trim();\n      body = String(parsed.body || '').trim();\n    } catch (e) { /* use fallback */ }\n  }\n  if (!body) {\n    body = `Hi ${c.first_name},\\n\\nWe have a new ${c.job.title} opening in ${c.job.location} that looks like a good fit for your background. Would you be open to a quick call this week to hear more?\\n\\nBest,\\n${c.job.recruiter_name}\\n${c.job.agency}`;\n  }\n  return { json: { ...c, subject, body } };\n});\n"
+      },
+      "id": "6c0d4f30-d70f-4209-9d63-2bbcb7d15f0d",
+      "name": "Parse Email Drafts",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1920,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "resource": "draft",
+        "subject": "={{ $json.subject }}",
+        "emailType": "text",
+        "message": "={{ $json.body }}",
+        "options": {
+          "sendTo": "={{ $json.email }}"
+        }
+      },
+      "id": "d1aaec6e-480a-4d4c-9ec4-50cd2904b21c",
+      "name": "Create Gmail Draft",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [
+        2160,
+        300
+      ],
+      "notes": "Drafts only: the recruiter reviews and sends",
+      "notesInFlow": true
+    },
+    {
+      "parameters": {
+        "jsCode": "// Update the ATS so these candidates are not re-contacted during the cooldown.\nconst S = $('Settings').first().json;\nconst today = new Intl.DateTimeFormat('en-CA', { timeZone: S.TIMEZONE }).format(new Date());\nreturn $('Parse Email Drafts').all().map((i) => ({\n  json: { candidate_id: i.json.candidate_id, last_contacted: today, status: 'Re-engaged (draft)' },\n}));\n"
+      },
+      "id": "a4bd9b93-14e0-47ec-a4fd-4f1c9b4d5b61",
+      "name": "Prepare Sheet Update",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2400,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "update",
+        "documentId": {
+          "__rl": true,
+          "value": "={{ $('Settings').first().json.SHEET_URL }}",
+          "mode": "url"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "Candidates",
+          "mode": "name"
+        },
+        "columns": {
+          "mappingMode": "autoMapInputData",
+          "value": {},
+          "matchingColumns": [
+            "candidate_id"
+          ],
+          "schema": []
+        },
+        "options": {}
+      },
+      "id": "e6cbab45-4103-49bc-8198-3e81e8d13751",
+      "name": "Update Candidate Records",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        2640,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// One Outreach row per draft. The Follow-up Sequence workflow tracks each row\n// through its Gmail thread: sent -> follow-ups -> replied / completed.\nconst S = $('Settings').first().json;\nconst drafts = $input.all();               // output of Create Gmail Draft\nconst people = $('Parse Email Drafts').all();\nconst today = new Intl.DateTimeFormat('en-CA', { timeZone: S.TIMEZONE }).format(new Date());\nconst stamp = new Date().toISOString().slice(0, 16).replace(/[-:T]/g, '');\n\nreturn people.map((p, i) => {\n  const c = p.json;\n  const j = c.job;\n  const d = (drafts[i] && drafts[i].json) || {};\n  const threadId = (d.message && d.message.threadId) || d.threadId || '';\n  const jobSummary = [j.title, j.location, j.pay, j.shift, j.client]\n    .filter((x) => x && x !== 'Not specified' && x !== 'one of our clients')\n    .join(' | ');\n  return {\n    json: {\n      outreach_id: `${c.candidate_id}-${stamp}`,\n      created_date: today,\n      job_title: j.title,\n      job_summary: jobSummary,\n      agency: j.agency,\n      recruiter_name: j.recruiter_name,\n      recruiter_email: j.recruiter_email,\n      candidate_id: c.candidate_id,\n      candidate_name: `${c.first_name} ${c.last_name}`,\n      first_name: c.first_name,\n      candidate_email: c.email,\n      original_subject: c.subject,\n      thread_id: threadId,\n      draft_id: d.id || '',\n      status: 'Awaiting send',\n      sent_date: '',\n      followups_sent: '0',\n      last_touch_date: '',\n      next_followup_due: '',\n      reply_date: '',\n      notes: threadId ? '' : 'Gmail returned no thread ID; follow-ups cannot track this one',\n    },\n  };\n});\n"
+      },
+      "id": "997a91d7-ec15-4186-8195-5dd861ad46a7",
+      "name": "Prepare Outreach Rows",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2400,
+        420
+      ],
+      "notes": "Hands each draft to the follow-up sequence",
+      "notesInFlow": true
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "value": "={{ $('Settings').first().json.SHEET_URL }}",
+          "mode": "url"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "Outreach",
+          "mode": "name"
+        },
+        "columns": {
+          "mappingMode": "autoMapInputData",
+          "value": {},
+          "matchingColumns": [],
+          "schema": []
+        },
+        "options": {}
+      },
+      "id": "fabb0a62-deb7-41bb-8eda-65eaf15d5b8e",
+      "name": "Add to Outreach",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        2640,
+        420
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Build one HTML summary email for the recruiter, plus a Run_Log row.\nconst S = $('Settings').first().json;\nconst scored = $input.all().map((i) => i.json).sort((a, b) => b.score - a.score);\nconst job = scored[0].job;\nconst totalInDb = $('Read Candidates (ATS)').all().length;\nconst matched = scored.filter((s) => s.matched);\nconst drafted = new Set(matched.slice(0, job.max_contacts).map((s) => s.candidate_id));\nconst esc = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');\nconst runDate = new Intl.DateTimeFormat('sv-SE', { timeZone: S.TIMEZONE, year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }).format(new Date());\n\nconst rows = scored.map((s) => {\n  const status = drafted.has(s.candidate_id) ? 'Draft ready' : (s.matched ? 'Match (over limit)' : 'Not a fit');\n  return `<tr><td>${esc(s.first_name + ' ' + s.last_name)}</td><td>${esc(s.current_title)}</td>` +\n    `<td style=\"text-align:center\">${s.score}</td><td>${status}</td><td>${esc(s.reason)}</td></tr>`;\n}).join('');\n\nconst firstName = String(job.recruiter_name || '').split(' ')[0] || 'there';\nconst html = `\n<div style=\"font-family:Arial,sans-serif;font-size:14px;color:#222\">\n<p>Hi ${esc(firstName)},</p>\n<p>The reactivation run for <b>${esc(job.title)}</b> (${esc(job.location)}) is complete.</p>\n<ul>\n  <li>Candidates in your database: <b>${totalInDb}</b></li>\n  <li>Reviewed by AI (after skipping do-not-contact, placed, not looking, interviewing, and anyone contacted in the last ${S.COOLDOWN_DAYS} days): <b>${scored.length}</b></li>\n  <li>Strong matches (score ${S.MIN_SCORE}+): <b>${matched.length}</b></li>\n  <li>Email drafts waiting in Gmail: <b>${drafted.size}</b></li>\n</ul>\n<p><b>Next step:</b> review and send the drafts. Once you send them, the follow-up workflow takes over: it checks every morning for replies and prepares polite follow-ups for anyone who hasn't answered. Anyone who replies is taken out of the sequence automatically.</p>\n<p>Scores are suggestions to save you time; you make the final decision on every candidate.</p>\n<table border=\"1\" cellpadding=\"6\" style=\"border-collapse:collapse;font-size:13px\">\n<tr style=\"background:#1F3A5F;color:#fff\"><th>Candidate</th><th>Current title</th><th>Score</th><th>Status</th><th>Why</th></tr>\n${rows}\n</table>\n</div>`;\n\nreturn [{\n  json: {\n    recruiter_email: job.recruiter_email,\n    subject: `Reactivation results: ${job.title} - ${drafted.size} drafts ready`,\n    html,\n    run_log: {\n      run_date: runDate,\n      workflow: 'Reactivation',\n      job_title: job.title,\n      candidates_in_db: String(totalInDb),\n      reviewed: String(scored.length),\n      strong_matches: String(matched.length),\n      drafts_created: String(drafted.size),\n      notes: '',\n    },\n  },\n}];\n"
+      },
+      "id": "da704a49-6ab2-4d90-803b-ba9900032b67",
+      "name": "Build Recruiter Summary",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1440,
+        700
+      ]
+    },
+    {
+      "parameters": {
+        "sendTo": "={{ $json.recruiter_email }}",
+        "subject": "={{ $json.subject }}",
+        "emailType": "html",
+        "message": "={{ $json.html }}",
+        "options": {
+          "appendAttribution": false
+        }
+      },
+      "id": "01498ec2-ab5c-4ebf-ac02-ca4b52e156c6",
+      "name": "Email Summary to Recruiter",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [
+        1680,
+        640
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Pass the run summary to the Run_Log tab (used by the monthly report).\nreturn [{ json: $('Build Recruiter Summary').first().json.run_log }];\n"
+      },
+      "id": "d8836db6-9b88-48c8-b71f-33c1efc38860",
+      "name": "Prepare Run Log",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1680,
+        820
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "value": "={{ $('Settings').first().json.SHEET_URL }}",
+          "mode": "url"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "Run_Log",
+          "mode": "name"
+        },
+        "columns": {
+          "mappingMode": "autoMapInputData",
+          "value": {},
+          "matchingColumns": [],
+          "schema": []
+        },
+        "options": {}
+      },
+      "id": "78155ecd-cba0-4e4f-87a5-210bd7699954",
+      "name": "Add to Run_Log",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        1920,
+        820
+      ]
+    },
+    {
+      "parameters": {
+        "content": "## 1. Candidate Reactivation (Standard)\nNew job form \u2192 skip excluded / recently contacted \u2192 AI scores fit with a reason \u2192 personal emails as **Gmail drafts** \u2192 Candidates + Match_Log updated \u2192 each draft added to **Outreach** for the follow-up sequence \u2192 recruiter summary \u2192 Run_Log row for the monthly report.\n\n**Setup:** paste the Google Sheet URL in **Settings**, connect Google Sheets (5 nodes), OpenAI (2), Gmail (2).",
+        "height": 260,
+        "width": 760,
+        "color": 4
+      },
+      "id": "f011a441-04cd-4cce-ae1b-c1bba5ae68c6",
+      "name": "Note: Overview",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -40,
+        -280
+      ]
+    }
+  ],
+  "connections": {
+    "Job Opening Form": {
+      "main": [
+        [
+          {
+            "node": "Settings",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Settings": {
+      "main": [
+        [
+          {
+            "node": "Read Candidates (ATS)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read Candidates (ATS)": {
+      "main": [
+        [
+          {
+            "node": "Pre-filter Candidates",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Pre-filter Candidates": {
+      "main": [
+        [
+          {
+            "node": "AI: Score Fit",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "AI: Score Fit": {
+      "main": [
+        [
+          {
+            "node": "Parse Scores",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Scores": {
+      "main": [
+        [
+          {
+            "node": "Prepare Log Rows",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Select Top Matches",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Build Recruiter Summary",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Log Rows": {
+      "main": [
+        [
+          {
+            "node": "Log to Match_Log",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Select Top Matches": {
+      "main": [
+        [
+          {
+            "node": "AI: Write Email",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "AI: Write Email": {
+      "main": [
+        [
+          {
+            "node": "Parse Email Drafts",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Email Drafts": {
+      "main": [
+        [
+          {
+            "node": "Create Gmail Draft",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Create Gmail Draft": {
+      "main": [
+        [
+          {
+            "node": "Prepare Sheet Update",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Prepare Outreach Rows",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Sheet Update": {
+      "main": [
+        [
+          {
+            "node": "Update Candidate Records",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Outreach Rows": {
+      "main": [
+        [
+          {
+            "node": "Add to Outreach",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Recruiter Summary": {
+      "main": [
+        [
+          {
+            "node": "Email Summary to Recruiter",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Prepare Run Log",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Run Log": {
+      "main": [
+        [
+          {
+            "node": "Add to Run_Log",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "OpenAI (Scoring)": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "AI: Score Fit",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "OpenAI (Writing)": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "AI: Write Email",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "pinData": {},
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true
+  },
+  "active": false,
+  "meta": {
+    "templateCredsSetupCompleted": false
+  },
+  "tags": []
+}

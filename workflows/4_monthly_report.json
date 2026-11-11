@@ -1,0 +1,232 @@
+{
+  "name": "Recruiting - 4. Monthly Client Report",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "months",
+              "triggerAtDayOfMonth": 1,
+              "triggerAtHour": 9
+            }
+          ]
+        }
+      },
+      "id": "71c90f07-65f0-45b7-b377-0e73ca16b821",
+      "name": "Monthly Schedule",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        200
+      ]
+    },
+    {
+      "parameters": {},
+      "id": "02437fca-99f3-4f53-8bae-fcc554d0f1ca",
+      "name": "Run Report Now",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        420
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// ===== SETTINGS =====\nreturn [{\n  json: {\n    SHEET_URL: 'PASTE_YOUR_GOOGLE_SHEET_URL_HERE',\n    TIMEZONE: 'America/Chicago',\n    AGENCY_NAME: 'Northfield Staffing',\n    REPORT_TO: 'owner@agency.com, you@yourdomain.com',  // comma-separated\n    PROVIDER_NAME: 'Saad Khan',\n    // Time-saved estimate (minutes a recruiter would spend doing each by hand). Adjust with the client.\n    MIN_PER_CANDIDATE_REVIEW: 5,\n    MIN_PER_EMAIL_WRITTEN: 10,\n    MIN_PER_FOLLOWUP: 3,\n  },\n}];\n"
+      },
+      "id": "b5908cf3-a65c-4d9e-a9eb-31071838c4ed",
+      "name": "Settings",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        240,
+        300
+      ],
+      "notes": "Recipients + time-saved assumptions",
+      "notesInFlow": true
+    },
+    {
+      "parameters": {
+        "operation": "read",
+        "documentId": {
+          "__rl": true,
+          "value": "={{ $('Settings').first().json.SHEET_URL }}",
+          "mode": "url"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "Run_Log",
+          "mode": "name"
+        },
+        "options": {}
+      },
+      "id": "404df740-da2a-4752-bc35-a70da55041bb",
+      "name": "Read Run_Log",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        480,
+        300
+      ],
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "operation": "read",
+        "documentId": {
+          "__rl": true,
+          "value": "={{ $('Settings').first().json.SHEET_URL }}",
+          "mode": "url"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "Outreach",
+          "mode": "name"
+        },
+        "options": {}
+      },
+      "id": "ee9862c9-6116-4bbd-9a53-d71e2084a204",
+      "name": "Read Outreach",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        720,
+        300
+      ],
+      "alwaysOutputData": true,
+      "executeOnce": true
+    },
+    {
+      "parameters": {
+        "jsCode": "// Monthly results report for the agency owner.\n// Scheduled run = previous calendar month. Manual run = last 30 days.\nconst S = $('Settings').first().json;\nlet scheduled = false;\ntry { scheduled = $execution.mode === 'production' && $('Monthly Schedule').isExecuted === true; } catch (e) { scheduled = false; }\n\nconst fmtDay = (d) => new Intl.DateTimeFormat('en-CA', { timeZone: S.TIMEZONE }).format(d);\nconst today = fmtDay(new Date());\nconst addDays = (ymd, n) => { const d = new Date(ymd + 'T12:00:00Z'); d.setUTCDate(d.getUTCDate() + Number(n || 0)); return d.toISOString().slice(0, 10); };\nconst parseDay = (v) => {\n  if (v === undefined || v === null || v === '') return '';\n  const s = String(v).trim();\n  if (/^\\d{4}-\\d{2}-\\d{2}/.test(s)) return s.slice(0, 10);\n  if (/^\\d+(\\.\\d+)?$/.test(s)) { const n = Number(s); if (n > 20000 && n < 80000) return new Date(Date.UTC(1899, 11, 30) + Math.floor(n) * 86400000).toISOString().slice(0, 10); }\n  const d = new Date(s); return isNaN(d) ? '' : d.toISOString().slice(0, 10);\n};\n\nlet start, end, label;\nif (scheduled) {\n  const [y, m] = today.split('-').map(Number);\n  const py = m === 1 ? y - 1 : y;\n  const pm = m === 1 ? 12 : m - 1;\n  start = `${py}-${String(pm).padStart(2, '0')}-01`;\n  end = addDays(`${y}-${String(m).padStart(2, '0')}-01`, -1);\n  label = new Date(start + 'T12:00:00Z').toLocaleString('en-US', { month: 'long', year: 'numeric', timeZone: 'UTC' });\n} else {\n  end = today; start = addDays(today, -29); label = `Last 30 days (${start} to ${end})`;\n}\nconst inRange = (d) => !!d && d >= start && d <= end;\nconst rowsOf = (name) => { try { return $(name).all().map((i) => i.json).filter((j) => j && Object.keys(j).length && !j.error); } catch (e) { return []; } };\nconst num = (v) => Number(v) || 0;\nconst sum = (arr, k) => arr.reduce((a, r) => a + num(r[k]), 0);\n\nconst runs = rowsOf('Read Run_Log').filter((r) => inRange(parseDay(r.run_date)));\nconst react = runs.filter((r) => r.workflow === 'Reactivation');\nconst checks = runs.filter((r) => r.workflow === 'Follow-up check');\nconst errors = runs.filter((r) => r.workflow === 'Error alert');\nconst outreach = rowsOf('Read Outreach');\n\nconst m = {\n  jobs: react.length,\n  reviewed: sum(react, 'reviewed'),\n  matches: sum(react, 'strong_matches'),\n  drafts: sum(react, 'drafts_created'),\n  followups: sum(checks, 'followups'),\n  sent: outreach.filter((o) => inRange(parseDay(o.sent_date))).length,\n  repliedRows: outreach.filter((o) => String(o.status).toLowerCase() === 'replied' && inRange(parseDay(o.reply_date))),\n  bounced: sum(checks, 'bounced'),\n  waiting: outreach.filter((o) => String(o.status).toLowerCase() === 'awaiting send').length,\n  active: outreach.filter((o) => String(o.status).toLowerCase() === 'active').length,\n  checks: checks.length,\n  errors: errors.length,\n};\nm.replies = m.repliedRows.length;\nm.replyRate = m.sent ? Math.round((m.replies / m.sent) * 100) : null;\nm.hours = Math.round(((m.reviewed * S.MIN_PER_CANDIDATE_REVIEW + m.drafts * S.MIN_PER_EMAIL_WRITTEN + m.followups * S.MIN_PER_FOLLOWUP) / 60) * 10) / 10;\n\nconst esc = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');\nconst tile = (n, l) => `<td style=\"background:#EEF3F9;border-radius:8px;padding:14px 10px;text-align:center;width:25%\"><div style=\"font-size:28px;font-weight:bold;color:#1F3A5F\">${n}</div><div style=\"font-size:12px;color:#555\">${l}</div></td>`;\nconst replyRows = m.repliedRows\n  .sort((a, b) => String(b.reply_date).localeCompare(String(a.reply_date)))\n  .map((o) => `<tr><td>${esc(o.candidate_name)}</td><td>${esc(o.job_title)}</td><td>${esc(parseDay(o.reply_date))}</td></tr>`).join('');\n\nconst html = `<div style=\"font-family:Arial,sans-serif;font-size:14px;color:#222;max-width:680px\">\n<h2 style=\"color:#1F3A5F;margin-bottom:4px\">Candidate reactivation report</h2>\n<p style=\"margin-top:0;color:#555\">${esc(S.AGENCY_NAME)} &middot; ${esc(label)}</p>\n<table cellspacing=\"8\" style=\"width:100%\"><tr>\n${tile(m.reviewed, 'past candidates reviewed')}${tile(m.sent, 'outreach emails sent')}${tile(m.replies, 'candidates replied')}${tile(m.replyRate === null ? '-' : m.replyRate + '%', 'reply rate')}\n</tr><tr>\n${tile(m.jobs, 'job openings worked')}${tile(m.matches, 'strong matches found')}${tile(m.followups, 'follow-ups')}${tile(m.hours, 'est. recruiter hours saved')}\n</tr></table>\n<h3 style=\"color:#1F3A5F\">Candidates who replied</h3>\n${replyRows ? `<table border=\"1\" cellpadding=\"6\" style=\"border-collapse:collapse;font-size:13px;width:100%\"><tr style=\"background:#1F3A5F;color:#fff\"><th>Candidate</th><th>Job</th><th>Replied</th></tr>${replyRows}</table>` : '<p>No replies recorded in this period.</p>'}\n<h3 style=\"color:#1F3A5F\">Open items</h3>\n<ul>\n<li>Sequences still running: <b>${m.active}</b></li>\n<li>Drafts not yet sent by a recruiter: <b>${m.waiting}</b>${m.waiting ? ' (these close automatically after a week if not sent)' : ''}</li>\n${m.bounced ? `<li>Bounced email addresses to fix in the ATS: <b>${m.bounced}</b></li>` : ''}\n</ul>\n<h3 style=\"color:#1F3A5F\">System health</h3>\n<p>Daily follow-up checks completed: <b>${m.checks}</b>. Errors recorded: <b>${m.errors}</b>${m.errors ? ' (each one triggered an immediate alert)' : ''}.</p>\n<p style=\"font-size:12px;color:#777\">Hours saved is an estimate: ${S.MIN_PER_CANDIDATE_REVIEW} min per candidate reviewed, ${S.MIN_PER_EMAIL_WRITTEN} min per email written, ${S.MIN_PER_FOLLOWUP} min per follow-up. Reply rate = replies divided by outreach emails sent in this period.</p>\n<p>Prepared by ${esc(S.PROVIDER_NAME)}</p>\n</div>`;\n\nconst { repliedRows, ...metrics } = m;\nreturn [{ json: { to: S.REPORT_TO, subject: `${S.AGENCY_NAME}: candidate reactivation report, ${label}`, html, metrics, period: { start, end } } }];\n"
+      },
+      "id": "317f94a5-a8f2-4e7f-973a-3dd1e320a5e6",
+      "name": "Build Monthly Report",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        960,
+        300
+      ],
+      "notes": "Scheduled = last month; manual = last 30 days",
+      "notesInFlow": true
+    },
+    {
+      "parameters": {
+        "sendTo": "={{ $json.to }}",
+        "subject": "={{ $json.subject }}",
+        "emailType": "html",
+        "message": "={{ $json.html }}",
+        "options": {
+          "appendAttribution": false
+        }
+      },
+      "id": "1b6917e7-b48a-4e0f-83a4-bb4f5811fe4e",
+      "name": "Email Report",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [
+        1200,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "content": "## 4. Monthly Client Report\nOn the 1st of each month it emails the agency owner last month's results: candidates reviewed, emails sent, replies, reply rate, follow-ups, estimated hours saved, who replied, open items and system health.\n\n*Run Report Now* sends a last-30-days version any time (useful for demos).",
+        "height": 200,
+        "width": 680,
+        "color": 6
+      },
+      "id": "c2430c58-c5be-4a38-b591-c09c6d06969a",
+      "name": "Note: Overview",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -40,
+        -180
+      ]
+    }
+  ],
+  "connections": {
+    "Monthly Schedule": {
+      "main": [
+        [
+          {
+            "node": "Settings",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Run Report Now": {
+      "main": [
+        [
+          {
+            "node": "Settings",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Settings": {
+      "main": [
+        [
+          {
+            "node": "Read Run_Log",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read Run_Log": {
+      "main": [
+        [
+          {
+            "node": "Read Outreach",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read Outreach": {
+      "main": [
+        [
+          {
+            "node": "Build Monthly Report",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Monthly Report": {
+      "main": [
+        [
+          {
+            "node": "Email Report",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "pinData": {},
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true,
+    "timezone": "America/Chicago"
+  },
+  "active": false,
+  "meta": {
+    "templateCredsSetupCompleted": false
+  },
+  "tags": []
+}

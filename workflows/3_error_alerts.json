@@ -1,0 +1,185 @@
+{
+  "name": "Recruiting - 3. Error Alerts",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "f0e88030-0783-468e-a665-9361ee53990b",
+      "name": "Error Trigger",
+      "type": "n8n-nodes-base.errorTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// ===== SETTINGS =====\nreturn [{\n  json: {\n    SHEET_URL: 'PASTE_YOUR_GOOGLE_SHEET_URL_HERE',\n    TIMEZONE: 'America/Chicago',\n    ALERT_TO: 'you@yourdomain.com',      // who gets error alerts (you, the automation provider)\n    CLIENT_NAME: 'Northfield Staffing',\n  },\n}];\n"
+      },
+      "id": "8fbdaf9c-cb48-49cf-a27d-3e390c426f83",
+      "name": "Settings",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        240,
+        300
+      ],
+      "notes": "Who gets alerts",
+      "notesInFlow": true
+    },
+    {
+      "parameters": {
+        "jsCode": "// Turn n8n's error details into a clear alert email with likely fixes.\nconst S = $('Settings').first().json;\nconst e = $('Error Trigger').first().json;\nconst wf = (e.workflow && e.workflow.name) || 'Unknown workflow';\nconst ex = e.execution || {};\nconst err = ex.error || (e.trigger && e.trigger.error) || {};\nconst node = ex.lastNodeExecuted || (err.node && err.node.name) || 'Unknown step';\nconst msg = String(err.message || 'No error message was provided');\nconst url = ex.url || '';\nconst esc = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');\nconst when = new Intl.DateTimeFormat('sv-SE', { timeZone: S.TIMEZONE, year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }).format(new Date());\n\nlet hint = 'Open the execution, click the red step, and read its error message.';\nif (/401|403|unauthori[sz]ed|invalid_grant|token|credential/i.test(msg)) hint = 'A login has expired or lost permission. Reconnect the Google / Gmail / OpenAI credential used by this step.';\nelse if (/429|rate limit/i.test(msg)) hint = 'The AI provider is rate-limiting. It usually clears on its own; if it repeats, lower MAX_TO_SCORE or upgrade the API plan.';\nelse if (/quota|insufficient/i.test(msg)) hint = 'The AI account is out of credit. Add credit in the provider\\'s billing settings.';\nelse if (/not found|unable to parse range|sheet/i.test(msg)) hint = 'A sheet, tab or column may have been renamed or deleted. Check the Google Sheet against the expected tab and column names.';\n\nconst html = `<div style=\"font-family:Arial,sans-serif;font-size:14px;color:#222\">\n<p><b>${esc(S.CLIENT_NAME)}</b>: the workflow <b>${esc(wf)}</b> failed at step <b>${esc(node)}</b> (${when}).</p>\n<p><b>Error:</b> ${esc(msg)}</p>\n<p><b>Likely fix:</b> ${esc(hint)}</p>\n${url ? `<p><a href=\"${esc(url)}\">Open this execution in n8n</a></p>` : ''}\n</div>`;\n\nreturn [{\n  json: {\n    to: S.ALERT_TO,\n    subject: `[Alert] ${S.CLIENT_NAME}: \"${wf}\" failed at \"${node}\"`,\n    html,\n    log: { run_date: when, workflow: 'Error alert', notes: `${wf} / ${node}: ${msg}`.slice(0, 300) },\n  },\n}];\n"
+      },
+      "id": "f91a1dcd-b72d-44b1-9940-17ec86aac6e5",
+      "name": "Build Alert",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        480,
+        300
+      ],
+      "notes": "Adds a likely fix",
+      "notesInFlow": true
+    },
+    {
+      "parameters": {
+        "sendTo": "={{ $json.to }}",
+        "subject": "={{ $json.subject }}",
+        "emailType": "html",
+        "message": "={{ $json.html }}",
+        "options": {
+          "appendAttribution": false
+        }
+      },
+      "id": "d283541b-b4be-4477-8644-6ecbb7fcb441",
+      "name": "Email Alert",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [
+        720,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Record the error in Run_Log so it appears in the monthly report.\nreturn [{ json: $('Build Alert').first().json.log }];\n"
+      },
+      "id": "52c37bd2-1945-49fa-a6fb-6b0852663e7e",
+      "name": "Prepare Run Log",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        720,
+        420
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "value": "={{ $('Settings').first().json.SHEET_URL }}",
+          "mode": "url"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "Run_Log",
+          "mode": "name"
+        },
+        "columns": {
+          "mappingMode": "autoMapInputData",
+          "value": {},
+          "matchingColumns": [],
+          "schema": []
+        },
+        "options": {}
+      },
+      "id": "28d922e9-6e1e-4bb4-a4a1-61252411d2b6",
+      "name": "Add to Run_Log",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        960,
+        420
+      ]
+    },
+    {
+      "parameters": {
+        "content": "## 3. Error Alerts (monitoring)\nRuns automatically whenever workflow 1, 2 or 4 fails during a live run. Emails you what failed, where, and the likely fix, and logs it for the monthly report.\n\n**Setup:** in workflows 1, 2 and 4 open *Settings (\u2699) \u2192 Error workflow* and pick this workflow.",
+        "height": 200,
+        "width": 620,
+        "color": 3
+      },
+      "id": "ade851f8-2eb2-45de-b897-81b39784261e",
+      "name": "Note: Overview",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -40,
+        -180
+      ]
+    }
+  ],
+  "connections": {
+    "Error Trigger": {
+      "main": [
+        [
+          {
+            "node": "Settings",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Settings": {
+      "main": [
+        [
+          {
+            "node": "Build Alert",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Alert": {
+      "main": [
+        [
+          {
+            "node": "Email Alert",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Prepare Run Log",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Run Log": {
+      "main": [
+        [
+          {
+            "node": "Add to Run_Log",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "pinData": {},
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true
+  },
+  "active": false,
+  "meta": {
+    "templateCredsSetupCompleted": false
+  },
+  "tags": []
+}

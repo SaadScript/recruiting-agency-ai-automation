@@ -1,0 +1,719 @@
+{
+  "name": "Recruiting - 2. Follow-up Sequence",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "days",
+              "triggerAtHour": 9
+            }
+          ]
+        }
+      },
+      "id": "934a0735-ce98-415d-a19b-4ced55f17108",
+      "name": "Daily Schedule (9am)",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        200
+      ]
+    },
+    {
+      "parameters": {},
+      "id": "29cea854-087b-4955-86a4-2bf2cf848684",
+      "name": "Run Check Now",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        420
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// ===== SETTINGS: the only node you normally need to edit =====\nreturn [{\n  json: {\n    SHEET_URL: 'PASTE_YOUR_GOOGLE_SHEET_URL_HERE',\n    TIMEZONE: 'America/Chicago',\n    // Follow-up 1 goes 3 days after the first email, follow-up 2 four days after that.\n    // FOR A DEMO set this to [0, 0] and FINAL_WAIT_DAYS to 0 so each manual run moves one step.\n    FOLLOWUP_GAPS_DAYS: [3, 4],\n    FINAL_WAIT_DAYS: 4,        // after the last follow-up, wait this long for a reply, then close\n    NEVER_SENT_DAYS: 7,        // drafts the recruiter never sent are closed after 7 days\n    FOLLOWUP_MODE: 'draft',    // 'draft' = recruiter reviews each follow-up; 'send' = follow-ups go out automatically\n    // Sequences stop if the candidate's status in the Candidates tab changes to one of these\n    STOP_STATUSES: ['do not contact', 'placed', 'not looking', 'interviewing'],\n  },\n}];\n"
+      },
+      "id": "2dda6997-d810-4042-bc47-548df993524c",
+      "name": "Settings",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        240,
+        300
+      ],
+      "notes": "Timing, follow-up mode, sheet URL",
+      "notesInFlow": true
+    },
+    {
+      "parameters": {
+        "operation": "read",
+        "documentId": {
+          "__rl": true,
+          "value": "={{ $('Settings').first().json.SHEET_URL }}",
+          "mode": "url"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "Outreach",
+          "mode": "name"
+        },
+        "options": {}
+      },
+      "id": "a4e42870-4c04-4e14-9ef2-b5e4bbbab9be",
+      "name": "Read Outreach",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        480,
+        300
+      ],
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "operation": "read",
+        "documentId": {
+          "__rl": true,
+          "value": "={{ $('Settings').first().json.SHEET_URL }}",
+          "mode": "url"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "Candidates",
+          "mode": "name"
+        },
+        "options": {}
+      },
+      "id": "a14ff676-6194-4d05-9603-65772ebd0289",
+      "name": "Read Candidates",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        720,
+        300
+      ],
+      "alwaysOutputData": true,
+      "executeOnce": true
+    },
+    {
+      "parameters": {
+        "jsCode": "// Pick the outreach rows that still need watching, and flag any whose\n// candidate has since been marked Do Not Contact / Placed / etc.\nconst S = $('Settings').first().json;\nconst ACTIVE = ['awaiting send', 'active'];\nconst stop = new Set(S.STOP_STATUSES.map((s) => s.toLowerCase()));\n\nconst candStatus = {};\nfor (const c of $('Read Candidates').all()) {\n  if (c.json.candidate_id) candStatus[c.json.candidate_id] = String(c.json.status || '').trim().toLowerCase();\n}\n\nconst out = [];\nfor (const item of $('Read Outreach').all()) {\n  const r = item.json;\n  if (!r.outreach_id) continue;\n  if (!ACTIVE.includes(String(r.status || '').trim().toLowerCase())) continue;\n  const cs = candStatus[r.candidate_id];\n  const { row_number, ...row } = r;\n  out.push({ json: { ...row, stop_reason: cs && stop.has(cs) ? `Candidate status changed to \"${cs}\"` : '' } });\n}\nreturn out;\n"
+      },
+      "id": "357cb180-c860-4384-b336-3ebd2c742d42",
+      "name": "Select Active Sequences",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        960,
+        300
+      ],
+      "notes": "Awaiting send + Active only",
+      "notesInFlow": true
+    },
+    {
+      "parameters": {
+        "resource": "thread",
+        "operation": "get",
+        "threadId": "={{ $json.thread_id || 'missing-thread-id' }}",
+        "options": {}
+      },
+      "id": "de2ae32a-3ddf-470b-9bc7-8fc2dfe28425",
+      "name": "Get Gmail Thread",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [
+        1200,
+        300
+      ],
+      "onError": "continueRegularOutput",
+      "notes": "Reads the email thread to see sent / replied / bounced",
+      "notesInFlow": true
+    },
+    {
+      "parameters": {
+        "jsCode": "// Read each Gmail thread and decide what happens next:\n// replied -> stop and alert recruiter | bounced -> stop | sent -> start sequence |\n// follow-up due -> write follow-up | all follow-ups done -> close.\nconst S = $('Settings').first().json;\nconst rows = $('Select Active Sequences').all();\nconst threads = $input.all();\n\nconst fmtDay = (d) => new Intl.DateTimeFormat('en-CA', { timeZone: S.TIMEZONE }).format(d);\nconst today = fmtDay(new Date());\nconst addDays = (ymd, n) => { const d = new Date(ymd + 'T12:00:00Z'); d.setUTCDate(d.getUTCDate() + Number(n || 0)); return d.toISOString().slice(0, 10); };\nconst parseDay = (v) => {\n  if (v === undefined || v === null || v === '') return '';\n  const s = String(v).trim();\n  if (/^\\d{4}-\\d{2}-\\d{2}/.test(s)) return s.slice(0, 10);\n  if (/^\\d+(\\.\\d+)?$/.test(s)) { const n = Number(s); if (n > 20000 && n < 80000) return new Date(Date.UTC(1899, 11, 30) + Math.floor(n) * 86400000).toISOString().slice(0, 10); }\n  const d = new Date(s); return isNaN(d) ? '' : d.toISOString().slice(0, 10);\n};\nconst labelsOf = (m) => {\n  const raw = m.labelIds || m.labels || [];\n  return (Array.isArray(raw) ? raw : []).map((l) => String(typeof l === 'string' ? l : (l.id || l.name || '')).toUpperCase());\n};\nconst headerOf = (m, name) => {\n  for (const k of [name, name.toLowerCase()]) {\n    if (m[k]) return typeof m[k] === 'string' ? m[k] : JSON.stringify(m[k]);\n  }\n  const hs = (m.payload && m.payload.headers) || [];\n  const h = Array.isArray(hs) ? hs.find((x) => String(x.name).toLowerCase() === name.toLowerCase()) : null;\n  return h ? String(h.value) : '';\n};\nconst timeOf = (m) => Number(m.internalDate) || Date.parse(headerOf(m, 'Date')) || 0;\nconst BOUNCE = /mailer-daemon|postmaster|mail delivery/i;\n\nreturn rows.map((rowItem, i) => {\n  const r = rowItem.json;\n  const t = (threads[i] && threads[i].json) || {};\n  const messages = Array.isArray(t.messages) ? t.messages : [];\n  const sent = messages.filter((m) => labelsOf(m).includes('SENT')).sort((a, b) => timeOf(a) - timeOf(b));\n  const inbound = messages\n    .filter((m) => { const l = labelsOf(m); return !l.includes('SENT') && !l.includes('DRAFT'); })\n    .sort((a, b) => timeOf(a) - timeOf(b));\n  const bounces = inbound.filter((m) => BOUNCE.test(headerOf(m, 'From')));\n  const replies = inbound.filter((m) => !BOUNCE.test(headerOf(m, 'From')));\n\n  const updates = { outreach_id: r.outreach_id };\n  let status = String(r.status || '').trim().toLowerCase() === 'active' ? 'Active' : 'Awaiting send';\n  let event = '';\n  let action = 'none';\n  let followup_number = 0;\n  let reply_snippet = '';\n  const followupsSent = Number(r.followups_sent || 0);\n  let nextDue = parseDay(r.next_followup_due);\n  const created = parseDay(r.created_date);\n\n  if (r.stop_reason) {\n    status = 'Stopped - candidate status changed'; event = 'stopped'; updates.notes = r.stop_reason;\n  } else if (replies.length) {\n    const first = replies[0];\n    status = 'Replied'; event = 'replied';\n    updates.reply_date = timeOf(first) ? fmtDay(new Date(timeOf(first))) : today;\n    updates.notes = 'Candidate replied - sequence stopped';\n    reply_snippet = String(first.snippet || '').slice(0, 240);\n  } else if (bounces.length) {\n    status = 'Bounced'; event = 'bounced'; updates.notes = 'Email bounced - check the address';\n  } else {\n    if (status === 'Awaiting send') {\n      if (sent.length) {\n        const sd = timeOf(sent[0]) ? fmtDay(new Date(timeOf(sent[0]))) : today;\n        status = 'Active'; event = 'sent_detected';\n        nextDue = addDays(sd, S.FOLLOWUP_GAPS_DAYS[0]);\n        Object.assign(updates, { sent_date: sd, last_touch_date: sd, next_followup_due: nextDue, followups_sent: '0' });\n      } else if (created && addDays(created, S.NEVER_SENT_DAYS) <= today) {\n        status = 'Stopped - never sent'; event = 'stopped';\n        updates.notes = `Draft not sent within ${S.NEVER_SENT_DAYS} days`;\n      }\n    }\n    if (status === 'Active' && nextDue && nextDue <= today) {\n      if (followupsSent < S.FOLLOWUP_GAPS_DAYS.length) {\n        action = 'followup'; followup_number = followupsSent + 1;\n      } else {\n        status = 'Completed - no reply'; event = 'completed'; updates.notes = 'No reply after all follow-ups';\n      }\n    }\n  }\n  updates.status = status;\n  return { json: { ...r, updates, action, event, followup_number, reply_snippet } };\n});\n"
+      },
+      "id": "6ecfa40a-339e-4ec8-bb2a-c892701514e1",
+      "name": "Decide Next Action",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1440,
+        300
+      ],
+      "notes": "Replied? Bounced? Sent? Follow-up due?",
+      "notesInFlow": true
+    },
+    {
+      "parameters": {
+        "jsCode": "// Only the sequences where a follow-up is due today.\nconst S = $('Settings').first().json;\nconst total = S.FOLLOWUP_GAPS_DAYS.length;\nreturn $input.all()\n  .filter((i) => i.json.action === 'followup')\n  .map((i) => ({ json: { ...i.json, total_followups: total, is_final: i.json.followup_number >= total ? 'yes' : 'no' } }));\n"
+      },
+      "id": "245f4c93-de97-40e5-a29e-fdf7032346a5",
+      "name": "Select Follow-ups",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1680,
+        60
+      ]
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "=Write a short follow-up email from a recruiter to a past candidate who has not replied to an email about a job opening.\n\nRecruiter: {{ $json.recruiter_name }} at {{ $json.agency }}\nCandidate first name: {{ $json.first_name }}\nJob details: {{ $json.job_summary }}\nThis is follow-up {{ $json.followup_number }} of {{ $json.total_followups }}. Final follow-up: {{ $json.is_final }}\n\nRules:\n- 40 to 80 words, friendly and low-pressure, plain text.\n- If this is not the final follow-up: a short check-in that mentions one detail from the job details above.\n- If this is the final follow-up: politely close the loop and say they can reply any time if their situation changes.\n- Only use facts given above. Do not invent pay, benefits, dates or other details.\n- Do not repeat the whole original email. Do not mention AI or automation.\n- Sign off with the recruiter's first name and the agency name.\n\nReply with JSON only, no other text:\n{\"body\": \"<email body, use \\n for line breaks>\"}"
+      },
+      "id": "290ed78c-437a-4717-be9f-b3eade8bd063",
+      "name": "AI: Write Follow-up",
+      "type": "@n8n/n8n-nodes-langchain.chainLlm",
+      "typeVersion": 1.5,
+      "position": [
+        1920,
+        60
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000
+    },
+    {
+      "parameters": {
+        "model": {
+          "__rl": true,
+          "value": "gpt-4o-mini",
+          "mode": "list",
+          "cachedResultName": "gpt-4o-mini"
+        },
+        "options": {
+          "temperature": 0.5
+        }
+      },
+      "id": "488af5d1-0d97-4726-99e8-0200251fc098",
+      "name": "OpenAI (Follow-ups)",
+      "type": "@n8n/n8n-nodes-langchain.lmChatOpenAi",
+      "typeVersion": 1.2,
+      "position": [
+        1940,
+        -150
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Read the AI's follow-up text; fall back to a safe template if needed.\nconst rows = $('Select Follow-ups').all();\nreturn $input.all().map((item, i) => {\n  const r = rows[i].json;\n  let body = '';\n  const match = String(item.json.text || '').match(/\\{[\\s\\S]*\\}/);\n  if (match) { try { body = String(JSON.parse(match[0]).body || '').trim(); } catch (e) { /* fallback */ } }\n  const recruiterFirst = String(r.recruiter_name || '').split(' ')[0] || r.recruiter_name;\n  if (!body) {\n    body = r.is_final === 'yes'\n      ? `Hi ${r.first_name},\\n\\nI don't want to fill your inbox, so this is my last note about the ${r.job_title} role. If the timing isn't right, no problem at all; just reply any time if your situation changes.\\n\\nBest,\\n${recruiterFirst}\\n${r.agency}`\n      : `Hi ${r.first_name},\\n\\nJust checking whether you saw my note about the ${r.job_title} opening. Happy to share details or set up a quick call if you're interested.\\n\\nBest,\\n${recruiterFirst}\\n${r.agency}`;\n  }\n  const subj = String(r.original_subject || r.job_title || 'Following up');\n  return { json: { ...r, body, subject: /^re:/i.test(subj) ? subj : `Re: ${subj}` } };\n});\n"
+      },
+      "id": "e0377974-afb8-43c5-af78-61dbab776d9d",
+      "name": "Parse Follow-ups",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2160,
+        60
+      ],
+      "notes": "Safe template if AI fails",
+      "notesInFlow": true
+    },
+    {
+      "parameters": {
+        "resource": "draft",
+        "subject": "={{ $json.subject }}",
+        "emailType": "text",
+        "message": "={{ $json.body }}",
+        "options": {
+          "sendTo": "={{ $json.candidate_email }}",
+          "threadId": "={{ $json.thread_id }}"
+        }
+      },
+      "id": "ff96907b-6407-4b4c-9382-352c5b4b6068",
+      "name": "Create Follow-up Draft",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [
+        2400,
+        60
+      ],
+      "notes": "Added to the same Gmail thread",
+      "notesInFlow": true
+    },
+    {
+      "parameters": {
+        "jsCode": "// Only used when FOLLOWUP_MODE is 'send': passes each new draft on to be sent.\nif ($('Settings').first().json.FOLLOWUP_MODE !== 'send') return [];\nreturn $input.all().map((i) => ({ json: { draft_id: i.json.id } }));\n"
+      },
+      "id": "0c07bcc3-4193-455d-82af-56967e9674fb",
+      "name": "Auto-send Filter",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2640,
+        -100
+      ],
+      "notes": "Only passes drafts when FOLLOWUP_MODE = 'send'",
+      "notesInFlow": true
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://gmail.googleapis.com/gmail/v1/users/me/drafts/send",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "gmailOAuth2",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ id: $json.draft_id }) }}",
+        "options": {}
+      },
+      "id": "3574b32f-6229-4904-af95-0dc1d15875fa",
+      "name": "Send Draft",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2880,
+        -100
+      ],
+      "notes": "Uses your Gmail credential",
+      "notesInFlow": true
+    },
+    {
+      "parameters": {
+        "jsCode": "// Record each follow-up and schedule the next one (or the final wait).\nconst S = $('Settings').first().json;\nconst today = new Intl.DateTimeFormat('en-CA', { timeZone: S.TIMEZONE }).format(new Date());\nconst addDays = (ymd, n) => { const d = new Date(ymd + 'T12:00:00Z'); d.setUTCDate(d.getUTCDate() + Number(n || 0)); return d.toISOString().slice(0, 10); };\nconst gaps = S.FOLLOWUP_GAPS_DAYS;\nreturn $('Parse Follow-ups').all().map((i) => {\n  const r = i.json;\n  const n = r.followup_number;\n  const next = n < gaps.length ? addDays(today, gaps[n]) : addDays(today, S.FINAL_WAIT_DAYS);\n  return {\n    json: {\n      ...r.updates,\n      followups_sent: String(n),\n      last_touch_date: today,\n      next_followup_due: next,\n      notes: S.FOLLOWUP_MODE === 'send' ? `Follow-up ${n} sent` : `Follow-up ${n} drafted for review`,\n    },\n  };\n});\n"
+      },
+      "id": "4dd8c2ed-a51a-470b-b470-1eadf794efa5",
+      "name": "Prepare Follow-up Updates",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2640,
+        160
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Status changes that don't involve writing a follow-up\n// (sent detected, replied, bounced, completed, stopped).\nreturn $input.all()\n  .filter((i) => i.json.action !== 'followup' && i.json.event)\n  .map((i) => ({ json: i.json.updates }));\n"
+      },
+      "id": "f6adf4c9-1489-49e1-95e9-afa3f2b58cbf",
+      "name": "Prepare Status Updates",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1680,
+        330
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "update",
+        "documentId": {
+          "__rl": true,
+          "value": "={{ $('Settings').first().json.SHEET_URL }}",
+          "mode": "url"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "Outreach",
+          "mode": "name"
+        },
+        "columns": {
+          "mappingMode": "autoMapInputData",
+          "value": {},
+          "matchingColumns": [
+            "outreach_id"
+          ],
+          "schema": []
+        },
+        "options": {}
+      },
+      "id": "cc96000e-cfad-4762-bfd0-f3d958266b82",
+      "name": "Update Outreach",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        2880,
+        260
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Keep the ATS in sync: mark candidates who replied or whose email bounced.\nconst S = $('Settings').first().json;\nconst today = new Intl.DateTimeFormat('en-CA', { timeZone: S.TIMEZONE }).format(new Date());\nreturn $input.all()\n  .filter((i) => ['replied', 'bounced'].includes(i.json.event))\n  .map((i) => ({\n    json: i.json.event === 'replied'\n      ? { candidate_id: i.json.candidate_id, status: 'Responded', last_contacted: today }\n      : { candidate_id: i.json.candidate_id, status: 'Email bounced' },\n  }));\n"
+      },
+      "id": "a5e1f32e-97ef-46c8-9793-90fa7cba5ca4",
+      "name": "Prepare Candidate Updates",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1680,
+        520
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "update",
+        "documentId": {
+          "__rl": true,
+          "value": "={{ $('Settings').first().json.SHEET_URL }}",
+          "mode": "url"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "Candidates",
+          "mode": "name"
+        },
+        "columns": {
+          "mappingMode": "autoMapInputData",
+          "value": {},
+          "matchingColumns": [
+            "candidate_id"
+          ],
+          "schema": []
+        },
+        "options": {}
+      },
+      "id": "c8f95f2b-6da3-4197-988e-e5d5012a01f2",
+      "name": "Update Candidates",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        1920,
+        520
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// One short morning email per recruiter: replies first, then follow-ups, then closed sequences.\nconst S = $('Settings').first().json;\nconst items = $input.all().map((i) => i.json).filter((j) => j.event || j.action === 'followup');\nif (!items.length) return [];\nconst esc = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');\n\nconst groups = {};\nfor (const j of items) {\n  const key = j.recruiter_email || 'unknown';\n  (groups[key] = groups[key] || []).push(j);\n}\n\nreturn Object.entries(groups).map(([to, list]) => {\n  const replied = list.filter((j) => j.event === 'replied');\n  const fups = list.filter((j) => j.action === 'followup');\n  const started = list.filter((j) => j.event === 'sent_detected');\n  const closed = list.filter((j) => ['completed', 'stopped', 'bounced'].includes(j.event));\n  const first = String(list[0].recruiter_name || '').split(' ')[0] || 'there';\n  const section = (title, rows) => rows.length ? `<h3 style=\"color:#1F3A5F;margin:18px 0 6px\">${title}</h3><ul style=\"margin-top:0\">${rows.join('')}</ul>` : '';\n\n  const html = `<div style=\"font-family:Arial,sans-serif;font-size:14px;color:#222\">\n<p>Good morning ${esc(first)},</p>\n<p>Here's today's update on your candidate outreach.</p>\n${section(`Replies: call these people first (${replied.length})`, replied.map((j) =>\n  `<li><b>${esc(j.candidate_name)}</b> replied about <b>${esc(j.job_title)}</b>${j.reply_snippet ? `: <i>\"${esc(j.reply_snippet)}\"</i>` : ''}</li>`))}\n${section(`Follow-ups (${fups.length})`, fups.map((j) =>\n  `<li>${esc(j.candidate_name)} (${esc(j.job_title)}): follow-up ${j.followup_number} ${S.FOLLOWUP_MODE === 'send' ? 'sent' : 'is waiting in your Gmail drafts'}</li>`))}\n${section(`Emails you sent, now being followed up (${started.length})`, started.map((j) =>\n  `<li>${esc(j.candidate_name)} (${esc(j.job_title)})</li>`))}\n${section(`Closed (${closed.length})`, closed.map((j) =>\n  `<li>${esc(j.candidate_name)} (${esc(j.job_title)}): ${esc(j.updates.status)}</li>`))}\n${S.FOLLOWUP_MODE === 'send' ? '' : '<p>Please review and send the follow-up drafts in Gmail.</p>'}\n</div>`;\n\n  const parts = [];\n  if (replied.length) parts.push(`${replied.length} ${replied.length === 1 ? 'reply' : 'replies'}`);\n  if (fups.length) parts.push(`${fups.length} follow-up${fups.length === 1 ? '' : 's'}`);\n  if (!parts.length) parts.push('status changes');\n  return { json: { to, subject: `Outreach update: ${parts.join(', ')}`, html } };\n});\n"
+      },
+      "id": "a3dc6697-210d-4c72-a8e8-9169679e8351",
+      "name": "Build Daily Digest",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1680,
+        700
+      ],
+      "notes": "Only sends if something happened",
+      "notesInFlow": true
+    },
+    {
+      "parameters": {
+        "sendTo": "={{ $json.to }}",
+        "subject": "={{ $json.subject }}",
+        "emailType": "html",
+        "message": "={{ $json.html }}",
+        "options": {
+          "appendAttribution": false
+        }
+      },
+      "id": "1d2f012a-e0f8-4c3b-b6ae-337f235c88bf",
+      "name": "Email Digest to Recruiter",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [
+        1920,
+        700
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// One Run_Log row per daily check (used by the monthly report).\nconst S = $('Settings').first().json;\nconst all = $input.all().map((i) => i.json);\nconst count = (e) => String(all.filter((j) => j.event === e).length);\nconst runDate = new Intl.DateTimeFormat('sv-SE', { timeZone: S.TIMEZONE, year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }).format(new Date());\nreturn [{\n  json: {\n    run_date: runDate,\n    workflow: 'Follow-up check',\n    active_sequences: String(all.length),\n    sent_detected: count('sent_detected'),\n    followups: String(all.filter((j) => j.action === 'followup').length),\n    replies: count('replied'),\n    completed: count('completed'),\n    stopped: count('stopped'),\n    bounced: count('bounced'),\n    notes: `Follow-up mode: ${S.FOLLOWUP_MODE}`,\n  },\n}];\n"
+      },
+      "id": "220b2ce9-887a-4d52-adbd-c9d2a405fded",
+      "name": "Prepare Run Log",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1680,
+        880
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "value": "={{ $('Settings').first().json.SHEET_URL }}",
+          "mode": "url"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "Run_Log",
+          "mode": "name"
+        },
+        "columns": {
+          "mappingMode": "autoMapInputData",
+          "value": {},
+          "matchingColumns": [],
+          "schema": []
+        },
+        "options": {}
+      },
+      "id": "7b1a3136-9916-4224-ba7c-7b943abc09a4",
+      "name": "Add to Run_Log",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        1920,
+        880
+      ]
+    },
+    {
+      "parameters": {
+        "content": "## 2. Follow-up Sequence (runs every morning)\nFor every email in the **Outreach** tab, it reads the Gmail thread:\n- **Replied** \u2192 stop, mark candidate *Responded*, tell the recruiter first thing\n- **Bounced** \u2192 stop, flag the address\n- **Recruiter sent the draft** \u2192 start the sequence\n- **Follow-up due** \u2192 AI writes a short follow-up in the same thread (draft, or sent if FOLLOWUP_MODE = 'send')\n- **No reply after all follow-ups / never sent / candidate now Do Not Contact** \u2192 close\n\n**Demo tip:** set FOLLOWUP_GAPS_DAYS to [0, 0] and FINAL_WAIT_DAYS to 0, then click *Run Check Now* to move one step at a time.",
+        "height": 330,
+        "width": 760,
+        "color": 4
+      },
+      "id": "2cb4ed3c-a9ab-4f6e-9892-047efc7f0bb4",
+      "name": "Note: Overview",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -40,
+        -380
+      ]
+    }
+  ],
+  "connections": {
+    "Daily Schedule (9am)": {
+      "main": [
+        [
+          {
+            "node": "Settings",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Run Check Now": {
+      "main": [
+        [
+          {
+            "node": "Settings",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Settings": {
+      "main": [
+        [
+          {
+            "node": "Read Outreach",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read Outreach": {
+      "main": [
+        [
+          {
+            "node": "Read Candidates",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read Candidates": {
+      "main": [
+        [
+          {
+            "node": "Select Active Sequences",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Select Active Sequences": {
+      "main": [
+        [
+          {
+            "node": "Get Gmail Thread",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Gmail Thread": {
+      "main": [
+        [
+          {
+            "node": "Decide Next Action",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Decide Next Action": {
+      "main": [
+        [
+          {
+            "node": "Select Follow-ups",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Prepare Status Updates",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Prepare Candidate Updates",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Build Daily Digest",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Prepare Run Log",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Select Follow-ups": {
+      "main": [
+        [
+          {
+            "node": "AI: Write Follow-up",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "AI: Write Follow-up": {
+      "main": [
+        [
+          {
+            "node": "Parse Follow-ups",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Follow-ups": {
+      "main": [
+        [
+          {
+            "node": "Create Follow-up Draft",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Create Follow-up Draft": {
+      "main": [
+        [
+          {
+            "node": "Auto-send Filter",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Prepare Follow-up Updates",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Auto-send Filter": {
+      "main": [
+        [
+          {
+            "node": "Send Draft",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Follow-up Updates": {
+      "main": [
+        [
+          {
+            "node": "Update Outreach",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Status Updates": {
+      "main": [
+        [
+          {
+            "node": "Update Outreach",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Candidate Updates": {
+      "main": [
+        [
+          {
+            "node": "Update Candidates",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Daily Digest": {
+      "main": [
+        [
+          {
+            "node": "Email Digest to Recruiter",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Run Log": {
+      "main": [
+        [
+          {
+            "node": "Add to Run_Log",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "OpenAI (Follow-ups)": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "AI: Write Follow-up",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "pinData": {},
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true,
+    "timezone": "America/Chicago"
+  },
+  "active": false,
+  "meta": {
+    "templateCredsSetupCompleted": false
+  },
+  "tags": []
+}
